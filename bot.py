@@ -1,13 +1,14 @@
 import logging
 import requests
+import os
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters, ConversationHandler
-from geopy.geocoders import Nominatim
-from keep_alive import keep_alive # Import the server
+from geopy.geocoders import ArcGIS  # CHANGED: Using ArcGIS instead of Nominatim
+from keep_alive import keep_alive 
 
 # --- CONFIGURATION ---
 CITY, TEMPERATURE = range(2)
-USER_AGENT = "MyTelegramWeatherBot/1.0 (contact@example.com)" # NWS requires a User-Agent
+USER_AGENT = "MyTelegramWeatherBot/1.0 (contact@example.com)" 
 
 # Setup logging
 logging.basicConfig(
@@ -17,12 +18,18 @@ logging.basicConfig(
 
 # --- NWS API HELPERS ---
 def get_lat_lon(city_name):
-    """Converts City Name to Latitude/Longitude"""
-    geolocator = Nominatim(user_agent=USER_AGENT)
-    location = geolocator.geocode(city_name)
-    if location:
-        return location.latitude, location.longitude
-    return None, None
+    """Converts City Name to Latitude/Longitude using ArcGIS"""
+    try:
+        # ArcGIS is much more stable on cloud servers (Render/Heroku) than Nominatim
+        geolocator = ArcGIS(user_agent=USER_AGENT)
+        location = geolocator.geocode(city_name, timeout=10)
+        
+        if location:
+            return location.latitude, location.longitude
+        return None, None
+    except Exception as e:
+        logging.error(f"Geocoding error: {e}")
+        return None, None
 
 def get_nws_endpoints(lat, lon):
     """Gets the Observation station and Forecast grid from NWS"""
@@ -63,18 +70,21 @@ def get_weather_data(station_id, forecast_url):
         if station_id:
             obs_url = f"https://api.weather.gov/stations/{station_id}/observations/latest"
             obs_resp = requests.get(obs_url, headers=headers).json()
-            # NWS returns temp in Celsius, we might need to convert if user inputs F
-            temp_c = obs_resp['properties']['temperature']['value']
-            if temp_c is not None:
-                current_temp = (temp_c * 9/5) + 32  # Convert to Fahrenheit for US users
+            
+            # Check if value exists (sometimes NWS returns null)
+            if 'properties' in obs_resp and obs_resp['properties'].get('temperature'):
+                temp_c = obs_resp['properties']['temperature']['value']
+                if temp_c is not None:
+                    current_temp = (temp_c * 9/5) + 32  # Convert to Fahrenheit
         
         # 2. Get Predicted High (Today)
         if forecast_url:
             fore_resp = requests.get(forecast_url, headers=headers).json()
-            periods = fore_resp['properties']['periods']
-            # The first period is usually "Today" or "This Afternoon"
-            if periods:
-                predicted_high = periods[0]['temperature']
+            if 'properties' in fore_resp:
+                periods = fore_resp['properties']['periods']
+                if periods:
+                    # The first period is usually "Today" or "This Afternoon"
+                    predicted_high = periods[0]['temperature']
                 
     except Exception as e:
         logging.error(f"API Error: {e}")
@@ -92,17 +102,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def set_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
     city = update.message.text
+    await update.message.reply_text(f"🔎 Searching for {city}...")
+    
     lat, lon = get_lat_lon(city)
     
     if not lat:
-        await update.message.reply_text("❌ Could not find that city. Please try again.")
+        await update.message.reply_text("❌ Could not find that city. Please try again (e.g., add the state or country).")
         return CITY
     
     # Fetch NWS Metadata
     station_id, forecast_url = get_nws_endpoints(lat, lon)
     
     if not station_id or not forecast_url:
-        await update.message.reply_text("❌ Error connecting to NWS for this location. Try a larger nearby city.")
+        await update.message.reply_text("❌ Error connecting to NWS for this location. The NWS API covers the US only. If this is a US city, try a larger nearby city.")
         return CITY
 
     # Store user data
@@ -110,7 +122,7 @@ async def set_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['station_id'] = station_id
     context.user_data['forecast_url'] = forecast_url
     
-    await update.message.reply_text(f"✅ Found {city}!\n\nNow, send me the **Temperature Threshold** (in Fahrenheit) you want to be alerted at (e.g., 85).")
+    await update.message.reply_text(f"✅ Found location!\n\nNow, send me the **Temperature Threshold** (in Fahrenheit) you want to be alerted at (e.g., 85).")
     return TEMPERATURE
 
 async def set_temperature(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -121,6 +133,12 @@ async def set_temperature(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Start the background job for this chat
         chat_id = update.message.chat_id
+        
+        # Remove existing jobs if any to prevent duplicates
+        current_jobs = context.job_queue.get_jobs_by_name(str(chat_id))
+        for job in current_jobs:
+            job.schedule_removal()
+
         context.job_queue.run_repeating(check_weather, interval=10, first=1, chat_id=chat_id, user_id=chat_id, name=str(chat_id))
         
         await update.message.reply_text(
@@ -136,14 +154,8 @@ async def set_temperature(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def check_weather(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
-    # Retrieve user data from the job's associated user_id
-    # Note: In PTB v20+, we access user_data via the application, but strictly inside jobs 
-    # we usually pass data via job.data or access persistence. 
-    # For simplicity in this script, we will assume the job context has access to user_data if we attached it, 
-    # OR we just use the simple `job.context` if passed. 
-    # BETTER APPROACH FOR JOBS: Access the `user_data` directly using the user_id.
-    
-    user_data = context.application.user_data[job.user_id]
+    # Retrieve user data
+    user_data = context.application.user_data.get(job.user_id)
     
     if not user_data:
         return
@@ -160,8 +172,7 @@ async def check_weather(context: ContextTypes.DEFAULT_TYPE):
         return # Skip if API failed
 
     # 2. Check Conditions
-    # Reset alert if it's a new day (simple logic: if temp drops significantly below limit, reset? 
-    # Or just let it fire once per session. For now, we fire once per crossing).
+    # Reset alert if temp drops 5 degrees below limit
     if current_temp < (limit - 5): 
         user_data['alert_sent_today'] = False
 
@@ -178,20 +189,24 @@ async def check_weather(context: ContextTypes.DEFAULT_TYPE):
         user_data['alert_sent_today'] = True
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.message.chat_id
+    # Remove jobs
+    current_jobs = context.job_queue.get_jobs_by_name(str(chat_id))
+    for job in current_jobs:
+        job.schedule_removal()
+        
     await update.message.reply_text("Monitoring stopped.")
     return ConversationHandler.END
 
 # --- MAIN ---
 if __name__ == '__main__':
-    import os
-    
     # 1. Start the dummy server for Render
     keep_alive()
     
     # 2. Run the Bot
     TOKEN = os.environ.get("TELEGRAM_TOKEN")
     if not TOKEN:
-        print("Error: TELEGRAM_TOKEN not found!")
+        print("Error: TELEGRAM_TOKEN not found in environment variables!")
     else:
         app = ApplicationBuilder().token(TOKEN).build()
         
