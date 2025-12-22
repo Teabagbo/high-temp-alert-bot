@@ -1,3 +1,4 @@
-aiogram>=3.0.0
-aiohttp
-apscheduler
+python-telegram-bot[job-queue]
+requests
+geopy
+flask
