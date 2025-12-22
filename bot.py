@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 import aiohttp
-from aioscheduler import Aioscheduler
+from aioscheduler import scheduler
 
 # ==================== CONFIGURATION ====================
 API_TOKEN = "8501421528:AAGncq6z5s9jotRmmkIoHK6YyFZpn1PtAH4"  # Will be added securely on Render
@@ -163,7 +163,7 @@ async def cmd_current(message: types.Message):
     await check_temperatures()
     await message.answer("✅ Done!")
 
-scheduler = Aioscheduler()
+scheduler = scheduler()
 
 async def main():
     scheduler.start()
