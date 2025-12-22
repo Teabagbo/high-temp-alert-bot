@@ -2,14 +2,14 @@ import asyncio
 import logging
 import sqlite3
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 import aiohttp
 from aioscheduler import TimedScheduler
 
 # ==================== CONFIGURATION ====================
-API_TOKEN = os.getenv("BOT_TOKEN")  # Set in Render Environment Variables
+API_TOKEN = os.getenv("BOT_TOKEN")
 
 USER_AGENT = "Personal High Temp Alert Bot (socialteabag@gmail.com)"
 
@@ -31,7 +31,6 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
-# Database
 conn = sqlite3.connect("alerts.db", check_same_thread=False)
 cursor = conn.cursor()
 cursor.execute("""
@@ -95,13 +94,8 @@ COORDS = {
     "KPHL": (39.8733, -75.2268),
 }
 
-async def check_temperatures(scheduler_instance: TimedScheduler):
+async def check_temperatures():
     chat_ids = [row[0] for row in cursor.execute("SELECT DISTINCT chat_id FROM thresholds").fetchall()]
-    if not chat_ids:
-        # Schedule next run even if no users
-        next_run = datetime.utcnow() + timedelta(seconds=10)
-        scheduler_instance.schedule(check_temperatures, next_run, scheduler_instance)
-        return
 
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
@@ -137,9 +131,9 @@ async def check_temperatures(scheduler_instance: TimedScheduler):
                 cursor.execute("INSERT OR REPLACE INTO last_alert (city, date) VALUES (?, ?)", (city, today_str))
                 conn.commit()
 
-    # Schedule the next run in 10 seconds
-    next_run = datetime.utcnow() + timedelta(seconds=10)
-    scheduler_instance.schedule(check_temperatures, next_run, scheduler_instance)
+    # Schedule next run in 10 seconds
+    next_run = datetime.now(timezone.utc) + timedelta(seconds=10)
+    scheduler.schedule(check_temperatures, next_run)
 
 # ==================== COMMANDS ====================
 
@@ -195,7 +189,7 @@ async def cmd_setthreshold(message: types.Message):
 @dp.message(Command("current"))
 async def cmd_current(message: types.Message):
     await message.answer("🔄 Checking all stations now...")
-    await check_temperatures(scheduler)  # Use the global scheduler
+    await check_temperatures()
     await message.answer("✅ Check complete!")
 
 # ==================== SCHEDULER ====================
@@ -205,9 +199,9 @@ scheduler = TimedScheduler()
 async def main():
     scheduler.start()
 
-    # Schedule the first run immediately
-    first_run = datetime.utcnow()
-    scheduler.schedule(check_temperatures, first_run, scheduler)
+    # Start the repeating checks
+    first_run = datetime.now(timezone.utc)
+    scheduler.schedule(check_temperatures, first_run)
 
     await dp.start_polling(bot)
 
