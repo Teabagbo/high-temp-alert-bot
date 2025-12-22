@@ -2,7 +2,7 @@ import asyncio
 import logging
 import sqlite3
 import os
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 import aiohttp
@@ -31,7 +31,7 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
-# Database for thresholds and last alert dates
+# Database
 conn = sqlite3.connect("alerts.db", check_same_thread=False)
 cursor = conn.cursor()
 cursor.execute("""
@@ -85,7 +85,6 @@ async def get_forecast_high(lat: float, lon: float) -> int | None:
                     return period["temperature"]
     return None
 
-# Coordinates for forecast endpoint
 COORDS = {
     "KMIA": (25.7617, -80.1918),
     "KLAX": (33.9416, -118.4085),
@@ -96,9 +95,12 @@ COORDS = {
     "KPHL": (39.8733, -75.2268),
 }
 
-async def check_temperatures():
+async def check_temperatures(scheduler_instance: TimedScheduler):
     chat_ids = [row[0] for row in cursor.execute("SELECT DISTINCT chat_id FROM thresholds").fetchall()]
     if not chat_ids:
+        # Schedule next run even if no users
+        next_run = datetime.utcnow() + timedelta(seconds=10)
+        scheduler_instance.schedule(check_temperatures, next_run, scheduler_instance)
         return
 
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -114,12 +116,10 @@ async def check_temperatures():
             threshold = row[0] if row else DEFAULT_THRESHOLD
 
             if current_temp_f >= threshold:
-                # Check if already alerted today
                 cursor.execute("SELECT 1 FROM last_alert WHERE city = ? AND date = ?", (city, today_str))
                 if cursor.fetchone():
-                    continue
+                    continue  # Already alerted today
 
-                # Get today's forecast high
                 lat, lon = COORDS[station]
                 forecast_high = await get_forecast_high(lat, lon)
                 forecast_text = f"{forecast_high}°F" if forecast_high is not None else "unavailable"
@@ -134,9 +134,12 @@ async def check_temperatures():
 
                 await bot.send_message(chat_id, message, parse_mode="HTML")
 
-                # Record alert sent
                 cursor.execute("INSERT OR REPLACE INTO last_alert (city, date) VALUES (?, ?)", (city, today_str))
                 conn.commit()
+
+    # Schedule the next run in 10 seconds
+    next_run = datetime.utcnow() + timedelta(seconds=10)
+    scheduler_instance.schedule(check_temperatures, next_run, scheduler_instance)
 
 # ==================== COMMANDS ====================
 
@@ -192,7 +195,7 @@ async def cmd_setthreshold(message: types.Message):
 @dp.message(Command("current"))
 async def cmd_current(message: types.Message):
     await message.answer("🔄 Checking all stations now...")
-    await check_temperatures()
+    await check_temperatures(scheduler)  # Use the global scheduler
     await message.answer("✅ Check complete!")
 
 # ==================== SCHEDULER ====================
@@ -201,7 +204,11 @@ scheduler = TimedScheduler()
 
 async def main():
     scheduler.start()
-    scheduler.schedule(check_temperatures, timedelta(seconds=10))  # Every 10 seconds
+
+    # Schedule the first run immediately
+    first_run = datetime.utcnow()
+    scheduler.schedule(check_temperatures, first_run, scheduler)
+
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
