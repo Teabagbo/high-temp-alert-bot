@@ -82,26 +82,3 @@ if __name__ == "__main__":
     
     print("Bot is running...")
     application.run_polling()
-
-from flask import Flask
-import threading
-
-app = Flask(__name__)
-
-@app.route('/')
-def health_check():
-    return "Bot is running!", 200
-
-def run_flask():
-    app.run(host='0.0.0.0', port=10000)
-
-# ... (Include your existing bot logic here) ...
-
-if __name__ == "__main__":
-    # Start Flask in a background thread
-    threading.Thread(target=run_flask, daemon=True).start()
-    
-    # Start your Telegram Bot
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-    # ... (rest of your handlers) ...
-    application.run_polling()
